@@ -1,0 +1,12 @@
+# never upload these
+*.pem
+*private*key*
+*.lic
+licenses.csv
+*.db
+build/
+dist/
+Output/
+*.spec
+__pycache__/
+*.pyc

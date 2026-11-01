@@ -1,0 +1,70 @@
+# Builds the Windows setup file on GitHub's Windows computers.
+# Runs on every push to main (and from the Actions tab). When APP_VERSION in app/config.py is new,
+# it also creates a release "vX.Y.Z" with the setup file.
+name: Build Windows setup
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      HAS_DOWNLOADS_TOKEN: ${{ secrets.DOWNLOADS_TOKEN != '' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path app\config.py -Pattern 'APP_VERSION = "([0-9.]+)"').Matches[0].Groups[1].Value
+          $i = (Select-String -Path installer.iss -Pattern '#define MyAppVersion "([0-9.]+)"').Matches[0].Groups[1].Value
+          if ($v -ne $i) { throw "Version mismatch: app/config.py says $v but installer.iss says $i" }
+          gh release view "v$v" --repo "${{ github.repository }}" *> $null
+          $new = if ($LASTEXITCODE -eq 0) { "false" } else { "true" }
+          $global:LASTEXITCODE = 0
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "new=$new" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v (new release: $new)"
+      - name: Install tools
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python tests/test_core.py
+      - name: Build program
+        run: python -m PyInstaller --noconfirm --windowed --name BevMargin --icon assets\app.ico --add-data "assets;assets" --collect-submodules reportlab.graphics.barcode --hidden-import cryptography main.py
+      - name: Build setup file
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-ChildItem Output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup-${{ steps.ver.outputs.version }}
+          path: |
+            Output/*.exe
+      - name: Private release (setup file)
+        if: steps.ver.outputs.new == 'true'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem Output\*.exe | Select-Object -First 1).FullName
+          gh release create "v${{ steps.ver.outputs.version }}" "$setup" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "v${{ steps.ver.outputs.version }}" --notes-file RELEASE_NOTES.md
+      - name: Publish setup file to the public downloads page (optional token)
+        if: steps.ver.outputs.new == 'true' && env.HAS_DOWNLOADS_TOKEN == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.DOWNLOADS_TOKEN }}
+        run: |
+          $setup = (Get-ChildItem Output\*.exe | Select-Object -First 1).FullName
+          gh release create "beer-v${{ steps.ver.outputs.version }}" "$setup" --repo mrobin1629-create/store-apps-downloads --title "Beer and Liquor Pricing v${{ steps.ver.outputs.version }}" --notes-file RELEASE_NOTES.md
