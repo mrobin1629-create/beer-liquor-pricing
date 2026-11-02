@@ -9,9 +9,8 @@ HOW UPDATES KEEP YOUR DATA
 import contextlib
 import datetime
 import glob
-import hashlib
 import os
-import secrets
+import pathlib
 import shutil
 import sqlite3
 
@@ -127,18 +126,7 @@ def now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-def hash_pw(password, salt=None):
-    salt = salt or secrets.token_hex(8)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
-    return f"{salt}${h}"
-
-
-def check_pw(password, stored):
-    try:
-        salt, _ = stored.split("$", 1)
-    except ValueError:
-        return False
-    return secrets.compare_digest(hash_pw(password, salt), stored)
+from .security import MAX_BACKUP_BYTES, check_file, check_pw, hash_pw, needs_rehash  # noqa: E402
 
 
 def _same(a, b):
@@ -403,8 +391,18 @@ class Database:
         return [dict(r) for r in self.conn.execute("SELECT id,username,role,created_at FROM users ORDER BY username")]
 
     def verify_user(self, username, password):
-        r = self.conn.execute("SELECT * FROM users WHERE username=?", (username.strip(),)).fetchone()
-        return dict(r) if r and check_pw(password, r["pw"]) else None
+        r = self.conn.execute("SELECT * FROM users WHERE username=?", ((username or "").strip(),)).fetchone()
+        if not r:
+            check_pw(password, hash_pw("x"))         # same time taken whether or not the user exists
+            return None
+        if not check_pw(password, r["pw"]):
+            return None
+        if needs_rehash(r["pw"]):                     # upgrade older password storage on the next good sign-in
+            self.conn.execute("UPDATE users SET pw=? WHERE id=?", (hash_pw(password), r["id"]))
+            self._commit()
+        u = dict(r)
+        u.pop("pw", None)
+        return u
 
     def add_user(self, username, password, role="clerk"):
         self.conn.execute("INSERT INTO users(username,pw,role,created_at) VALUES (?,?,?,?)",
@@ -456,9 +454,16 @@ class Database:
                  os.path.getsize(f)) for f in files]
 
     def restore(self, src):
-        test = sqlite3.connect(src)
+        check_file(src, MAX_BACKUP_BYTES)
+        with open(src, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                raise ValueError("That file is not a Beer and Liquor Pricing backup.")
+        test = sqlite3.connect(pathlib.Path(src).resolve().as_uri() + "?mode=ro", uri=True)
         try:
             ok = test.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'").fetchone()
+            if test.execute("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger','view')").fetchone()[0]:
+                raise ValueError("That backup file contains extra database code this app never creates, "
+                                 "so it was refused. Nothing was changed.")
             healthy = test.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         except sqlite3.DatabaseError:
             ok, healthy = False, False

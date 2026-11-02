@@ -3,7 +3,7 @@
 ; setup file upgrade the existing install instead of installing twice.
 #define MyAppName "Beer and Liquor Pricing"
 ; keep MyAppVersion in sync with APP_VERSION in app\config.py
-#define MyAppVersion "1.5.0"
+#define MyAppVersion "1.5.1"
 #define MyAppExe "BevMargin.exe"
 
 [Setup]

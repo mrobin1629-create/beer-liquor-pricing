@@ -17,7 +17,7 @@ python tests\test_core.py || goto :err
 echo [3/4] Building program folder with PyInstaller...
 rmdir /s /q build dist 2>nul
 python -m PyInstaller --noconfirm --windowed --name BevMargin --icon assets\app.ico ^
-  --add-data "assets;assets" --collect-submodules reportlab.graphics.barcode --hidden-import cryptography main.py || goto :err
+  --add-data "assets;assets" --collect-submodules reportlab.graphics.barcode --hidden-import cryptography --hidden-import defusedxml main.py || goto :err
 
 echo [4/4] Building setup file with Inno Setup...
 set ISCC=

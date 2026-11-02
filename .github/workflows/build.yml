@@ -40,7 +40,7 @@ jobs:
       - name: Run tests
         run: python tests/test_core.py
       - name: Build program
-        run: python -m PyInstaller --noconfirm --windowed --name BevMargin --icon assets\app.ico --add-data "assets;assets" --collect-submodules reportlab.graphics.barcode --hidden-import cryptography main.py
+        run: python -m PyInstaller --noconfirm --windowed --name BevMargin --icon assets\app.ico --add-data "assets;assets" --collect-submodules reportlab.graphics.barcode --hidden-import cryptography --hidden-import defusedxml main.py
       - name: Build setup file
         shell: pwsh
         run: |

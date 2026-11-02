@@ -9,6 +9,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
 import urllib.request
 
 from .config import APP_VERSION
@@ -26,10 +28,36 @@ def _ver(text):
     return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
 
 
+MAX_SETUP_BYTES = 500 * 1024 * 1024
+
+
+def allowed_url(url):
+    """Updates are only ever fetched over HTTPS from GitHub (no other website, no local network addresses)."""
+    try:
+        u = urllib.parse.urlsplit(url or "")
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    return (u.scheme == "https" and not u.username and not u.password and u.port in (None, 443)
+            and (host in ("github.com", "api.github.com") or host.endswith(".githubusercontent.com")))
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not allowed_url(newurl):
+            raise urllib.error.URLError(f"Blocked redirect to {urllib.parse.urlsplit(newurl).hostname}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()), _SafeRedirect)
+
+
 def _open(url, timeout):
+    if not allowed_url(url):
+        raise IOError("Update address refused (not a GitHub HTTPS address).")
     req = urllib.request.Request(url, headers={"User-Agent": f"BevMargin/{APP_VERSION}",
                                                "Accept": "application/vnd.github+json"})
-    return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())
+    return _opener.open(req, timeout=timeout)
 
 
 def _from_manifest(timeout):
@@ -86,8 +114,17 @@ def newer_available(timeout=6):
 
 
 def download(info, progress=None):
-    """Downloads the setup file to a temp folder and checks its size / SHA-256. Returns the file path."""
-    path = os.path.join(tempfile.gettempdir(), info["name"])
+    """Downloads the setup file to a new private temp folder and checks its size / SHA-256. Returns the file path."""
+    want = (info.get("sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", want):
+        raise IOError("This update has no safety fingerprint, so it wasn't downloaded. "
+                      "Please download the setup file from the downloads page instead.")
+    name = os.path.basename(info.get("name") or "")
+    if not re.fullmatch(re.escape(ASSET_PREFIX) + r"[0-9.]+\.exe", name):
+        raise IOError("Unexpected update file name.")
+    if (info.get("size") or 0) > MAX_SETUP_BYTES:
+        raise IOError("The update file is unexpectedly large.")
+    path = os.path.join(tempfile.mkdtemp(prefix="update-"), name)
     h = hashlib.sha256()
     done = 0
     with _open(info["url"], 60) as r, open(path, "wb") as f:
@@ -96,6 +133,10 @@ def download(info, progress=None):
             chunk = r.read(256 * 1024)
             if not chunk:
                 break
+            if done + len(chunk) > MAX_SETUP_BYTES:
+                f.close()
+                os.remove(path)
+                raise IOError("The update file is unexpectedly large.")
             f.write(chunk)
             h.update(chunk)
             done += len(chunk)
@@ -104,7 +145,7 @@ def download(info, progress=None):
     if info.get("size") and done != info["size"]:
         os.remove(path)
         raise IOError("The download was incomplete. Please try again.")
-    if info.get("sha256") and h.hexdigest() != info["sha256"]:
+    if h.hexdigest() != want:
         os.remove(path)
         raise IOError("The downloaded file didn't pass the safety check. Please try again.")
     return path

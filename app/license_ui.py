@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import license as lic
+from . import security
 from .config import APP_NAME, CREDIT, DEVELOPER
 from .config import resource_path
 
@@ -118,6 +119,11 @@ class LicenseDialog(tk.Toplevel):
         path = filedialog.askopenfilename(parent=self, title="Open license key file",
                                           filetypes=[("License key", "*.lic *.txt"), ("All files", "*.*")])
         if path:
+            try:
+                security.check_file(path, security.MAX_KEY_BYTES)
+            except ValueError as ex:
+                self.msg.config(text=f"Couldn't use that file: {ex}", fg=RED)
+                return
             with open(path, encoding="utf-8", errors="ignore") as f:
                 self.key.delete("1.0", "end")
                 self.key.insert("1.0", f.read().strip())

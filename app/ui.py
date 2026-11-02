@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import calc, io_utils, labels, pricing
+from . import calc, io_utils, labels, pricing, security
 from . import license as lic
 from . import updater
 from .license_ui import LicenseDialog, startup_gate
@@ -63,6 +63,23 @@ def load_image(name):
 
 
 # ----------------------------------------------------------------- login
+def ask_new_password(parent, title, username="", intro=""):
+    """Asks for a new password twice and checks it is strong enough. Returns it, or None if cancelled."""
+    while True:
+        p1 = simpledialog.askstring(title, (intro + "\n\n" if intro else "") +
+                                    f"New password (at least {security.MIN_PASSWORD} characters):", show="•", parent=parent)
+        if p1 is None:
+            return None
+        problem = security.password_problem(p1, username)
+        if problem:
+            messagebox.showwarning(title, problem, parent=parent)
+            continue
+        if simpledialog.askstring(title, "Type it again:", show="•", parent=parent) != p1:
+            messagebox.showwarning(title, "The passwords didn't match. Please try again.", parent=parent)
+            continue
+        return p1
+
+
 class LoginDialog(tk.Toplevel):
     def __init__(self, master, db):
         super().__init__(master)
@@ -88,7 +105,8 @@ class LoginDialog(tk.Toplevel):
                 e.focus_set()
         tk.Checkbutton(self, text="Remember me (username only)", variable=self.remember, bg=PANEL, font=FONT,
                        activebackground=PANEL).grid(row=5, column=1, sticky="w", padx=(0, 30))
-        self.msg = tk.Label(self, text="First time? Use admin / admin", font=("Segoe UI", 9), bg=PANEL, fg=GREY_FG)
+        self.msg = tk.Label(self, text="First time? Use admin / admin - you'll then choose your own password.",
+                            font=("Segoe UI", 9), bg=PANEL, fg=GREY_FG)
         self.msg.grid(row=6, column=0, columnspan=2)
         ttk.Button(self, text="Sign in", style="Accent.TButton", command=self.ok).grid(
             row=7, column=0, columnspan=2, pady=(10, 24), ipadx=20)
@@ -101,13 +119,33 @@ class LoginDialog(tk.Toplevel):
         self.grab_set()
 
     def ok(self):
-        name = self.u.get().strip()
-        u = self.db.verify_user(name, self.p.get())
-        if not u:
-            self.db.log(f"Failed sign-in attempt for '{name}'", name or "?", "security")
-            self.msg.config(text="Wrong username or password.", fg="#c62828")
+        name = self.u.get().strip()[:60]
+        wait = security.locked_for(self.db, name)
+        if wait:
+            self.msg.config(text=f"Too many wrong passwords. Try again in {security.wait_text(wait)}.", fg="#c62828")
             self.p.set("")
             return
+        pw = self.p.get()
+        u = self.db.verify_user(name, pw)
+        if not u:
+            secs = security.record_failure(self.db, name)
+            self.db.log(f"Failed sign-in attempt for '{name}'" + (f" - locked for {security.wait_text(secs)}" if secs else ""),
+                        name or "?", "security")
+            self.msg.config(text=f"Too many wrong passwords. Try again in {security.wait_text(secs)}." if secs
+                            else "Wrong username or password.", fg="#c62828")
+            self.p.set("")
+            return
+        security.record_success(self.db, name)
+        if security.password_problem(pw, u["username"]):       # default admin/admin or a weak old password
+            new = ask_new_password(self, "Set a new password", u["username"],
+                                   "For your security, please choose a new password before continuing." +
+                                   (" (The default password 'admin' can't be used.)" if pw == "admin" else ""))
+            if not new:
+                self.msg.config(text="You need to set a new password to sign in.", fg="#c62828")
+                self.p.set("")
+                return
+            self.db.set_password(u["username"], new)
+            self.db.log("Changed own password (required at sign-in)", u["username"], "user")
         self.db.set_setting("remember_user", u["username"] if self.remember.get() else "")
         self.db.log(f"Signed in ({u['role']})", u["username"], "login")
         self.user = u
@@ -786,13 +824,12 @@ class CostChangeWindow(tk.Toplevel):
         self.app.open_labels([self.app.db.get_product(i) for i in prods])
 
     def export(self):
-        import csv
         path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv", filetypes=[("CSV", "*.csv")],
                                             initialfile=f"cost-changes-{datetime.date.today()}")
         if not path:
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
+            w = security.csv_writer(f)
             w.writerow(["Item#", "Description", "Tab", "Price", "Old net", "New net", "Selling", "Old margin %",
                         "New margin %", "Target %", "Suggested", "Below target"])
             for r in self.rows:
@@ -962,10 +999,6 @@ class App(tk.Tk):
             self.after(400, lambda: messagebox.showwarning(
                 "Database check", "The quick database check found a problem.\n\nGo to Backup > Run health check, "
                 "and restore your newest backup if it fails."))
-        if self.user["username"].lower() == "admin" and db.verify_user("admin", "admin"):
-            self.after(600, lambda: messagebox.showinfo(
-                "Change the default password",
-                "You're using the default admin password. Go to Users > Change my password to set a new one."))
 
     # ---------- look ----------
     def _styles(self):
@@ -1278,7 +1311,8 @@ class App(tk.Tk):
 
     # ---------- time-savers ----------
     def open_pricing_rules(self):
-        PricingRulesDialog(self)
+        if self._need_admin("change pricing rules"):
+            PricingRulesDialog(self)
 
     def _flash(self, text, ok=True):
         self.scan_status.config(text=text, fg="#2e7d32" if ok else "#c62828")
@@ -1610,30 +1644,42 @@ class App(tk.Tk):
         tk.Label(body, text="Admin: everything.   Clerk: add and edit products, reports, import/export. Can't delete products or manage users.",
                  font=("Segoe UI", 9), bg=PANEL, fg=GREY_FG).pack(anchor="w", pady=(6, 0))
 
-    def _ask_pw(self, title):
-        p1 = simpledialog.askstring(title, "New password (at least 4 characters):", show="•", parent=self)
-        if p1 is None:
-            return None
-        if len(p1) < 4:
-            messagebox.showwarning(title, "Password must be at least 4 characters.")
-            return None
-        if simpledialog.askstring(title, "Type it again:", show="•", parent=self) != p1:
-            messagebox.showwarning(title, "The passwords didn't match.")
-            return None
-        return p1
+    def _need_admin(self, what):
+        """Permission check inside the action itself (not only by hiding buttons)."""
+        if getattr(self, "is_admin", False):
+            return True
+        messagebox.showwarning("Not allowed", f"Only admin users can {what}.")
+        self.db.log(f"Blocked: clerk tried to {what}", self.user["username"], "security")
+        return False
+
+    def _ask_pw(self, title, username=""):
+        return ask_new_password(self, title, username)
 
     def _change_my_pw(self):
-        pw = self._ask_pw("Change my password")
+        cur = simpledialog.askstring("Change my password", "Current password:", show="•", parent=self)
+        if cur is None:
+            return
+        if not self.db.verify_user(self.user["username"], cur):
+            self.db.log("Change password refused: wrong current password", self.user["username"], "security")
+            messagebox.showwarning("Change my password", "That isn't your current password.")
+            return
+        pw = self._ask_pw("Change my password", self.user["username"])
         if pw:
             self.db.set_password(self.user["username"], pw)
             self.db.log("Changed own password", self.user["username"], "user")
             messagebox.showinfo("Password changed", "Your password was changed.")
 
     def _add_user(self):
+        if not self._need_admin("add users"):
+            return
         name = simpledialog.askstring("Add user", "Username:", parent=self)
         if not name or not name.strip():
             return
-        pw = self._ask_pw("Add user")
+        name = name.strip()
+        if len(name) > 40 or not all(c.isalnum() or c in " ._-@" for c in name):
+            messagebox.showwarning("Add user", "Usernames can use letters, numbers, spaces and . _ - @ (up to 40).")
+            return
+        pw = self._ask_pw("Add user", name)
         if not pw:
             return
         role = "admin" if messagebox.askyesno("Role", f"Make {name} an admin?\n\nYes = admin, No = clerk") else "clerk"
@@ -1653,15 +1699,19 @@ class App(tk.Tk):
         return int(s[0]), self.user_tree.item(s[0])["values"][0]
 
     def _reset_pw(self):
+        if not self._need_admin("reset passwords"):
+            return
         sel = self._sel_user()
         if sel:
-            pw = self._ask_pw(f"Reset password for {sel[1]}")
+            pw = self._ask_pw(f"Reset password for {sel[1]}", str(sel[1]))
             if pw:
                 self.db.set_password(sel[1], pw)
                 self.db.log(f"Reset password for {sel[1]}", self.user["username"], "user")
                 messagebox.showinfo("Password reset", f"Password for {sel[1]} was changed.")
 
     def _del_user(self):
+        if not self._need_admin("delete users"):
+            return
         sel = self._sel_user()
         if not sel:
             return
@@ -1746,6 +1796,8 @@ class App(tk.Tk):
                                      "Entries can't be edited or deleted from the app.")
 
     def _export_audit(self):
+        if not self._need_admin("export the audit log"):
+            return
         self._export_rows("audit-log", ["When", "User", "Type", "What happened"],
                           [(r["ts"], r["username"], AUDIT_KINDS.get(r["kind"] or "other", r["kind"]), r["action"])
                            for r in self.db.audit_log(limit=1000000)])
@@ -1757,13 +1809,12 @@ class App(tk.Tk):
                            for r in self.db.price_history(limit=1000000)])
 
     def _export_rows(self, name, header, rows):
-        import csv
         path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=f"{name}-{datetime.date.today()}",
                                             filetypes=[("CSV", "*.csv")])
         if not path:
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
+            w = security.csv_writer(f)
             w.writerow(header)
             w.writerows(rows)
         self.db.log(f"Exported {name} ({len(rows)} rows)", self.user["username"], "export")
@@ -1802,6 +1853,9 @@ class App(tk.Tk):
         return page
 
     def _toggle_auto(self):
+        if not self._need_admin("change backup settings"):
+            self.auto_var.set(self.db.get_setting("auto_backup", "1") == "1")
+            return
         self.db.set_setting("auto_backup", "1" if self.auto_var.get() else "0")
         self.db.log(f"Automatic backup on close turned {'on' if self.auto_var.get() else 'off'}", self.user["username"], "settings")
 
@@ -2047,6 +2101,8 @@ class App(tk.Tk):
         self._update_footer()
 
     def _set_store_name(self):
+        if not self._need_admin("change the store name"):
+            return
         name = simpledialog.askstring("Store name", "Store name:", initialvalue=self.db.get_setting("store_name", ""), parent=self)
         if name is not None and name.strip():
             self.db.set_setting("store_name", name.strip())

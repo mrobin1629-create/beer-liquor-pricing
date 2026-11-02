@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from . import calc
+from .security import MAX_IMPORT_BYTES, MAX_IMPORT_ROWS, check_file, clean_text, pdf_text as _t, safe_cell
 
 def export_columns(category=None):
     """Columns for export. With a category, price headers use its labels (e.g. '6 Btl SP')."""
@@ -97,23 +98,49 @@ def _rows_to_products(headers, rows, default_category="Beer", where=""):
     return out
 
 
+IMPORT_KINDS = {".xlsx", ".xlsm", ".csv", ".txt"}
+
+
+def _sheet_rows(ws):
+    """Rows of one sheet (text cleaned), refusing sheets that are unreasonably large."""
+    out = []
+    for r in ws.iter_rows(values_only=True):
+        if len(out) >= MAX_IMPORT_ROWS:
+            raise ValueError(f"Sheet '{ws.title}' has more than {MAX_IMPORT_ROWS:,} rows - too large to import.")
+        out.append([clean_text(v) for v in (r or ())[:200]])
+    return out
+
+
+def _csv_rows(path):
+    out = []
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
+        for r in csv.reader(f):
+            if len(out) >= MAX_IMPORT_ROWS:
+                raise ValueError(f"The file has more than {MAX_IMPORT_ROWS:,} rows - too large to import.")
+            out.append([clean_text(v) for v in r[:200]])
+    return out
+
+
 def read_file(path, default_category="Beer"):
     """Excel: every sheet is read; a sheet named Beer or Liquor sets the category
     for rows that don't have a Category column."""
+    check_file(path, MAX_IMPORT_BYTES, IMPORT_KINDS)
     if path.lower().endswith((".xlsx", ".xlsm")):
         import openpyxl
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        except Exception as ex:
+            raise ValueError(f"Couldn't read that Excel file ({type(ex).__name__}). Is it damaged or password protected?")
         out = []
         for ws in wb.worksheets:
-            rows = list(ws.iter_rows(values_only=True))
+            rows = _sheet_rows(ws)
             if len(rows) < 2 or not rows[0] or not any(rows[0]):
                 continue
             name = ws.title.strip().title()
             cat = name if name in calc.CATEGORIES else default_category
             out += _rows_to_products(rows[0], rows[1:], cat, where=f"Sheet '{ws.title}'")
         return out
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = list(csv.reader(f))
+    rows = _csv_rows(path)
     if not rows:
         return []
     return _rows_to_products(rows[0], rows[1:], default_category, where="")
@@ -143,7 +170,7 @@ def _cell(key, d):
         return ""
     if key.endswith("_margin"):
         return round(v, 1)
-    return v
+    return safe_cell(v)
 
 
 def export_csv(path, products, include_dep=False, targets=None):
@@ -211,7 +238,7 @@ def export_pdf(path, products, title, include_dep=False, targets=None):
                             rightMargin=0.35 * inch, topMargin=0.4 * inch, bottomMargin=0.4 * inch)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     all_rows = _export_rows(products, include_dep, targets)
-    story = [Paragraph(title, styles["Title"]),
+    story = [Paragraph(_t(title), styles["Title"]),
              Paragraph(f"Generated {stamp} &nbsp;|&nbsp; {len(all_rows)} products &nbsp;|&nbsp; Inventory value (Ext): "
                        f"{_fmt_money(sum(r['ext'] or 0 for r in all_rows))} &nbsp;|&nbsp; red = below target margin",
                        styles["Normal"])]
@@ -226,7 +253,7 @@ def export_pdf(path, products, title, include_dep=False, targets=None):
         data, low_cells = [head], []
         for r_i, d in enumerate(rows, start=1):
             data.append([
-                d.get("item_no", ""), Paragraph(d.get("description", ""), small),
+                d.get("item_no", ""), Paragraph(_t(d.get("description", "")), small),
                 f"{d.get('qty') or 0:g}", _fmt_money(d.get("net")), _fmt_money(d.get("dep")),
                 _fmt_money(d.get("ext")), d.get("case_units") or ""]
                 + [_fmt_money(d.get(f"{k}_sp")) for k in keys] + [_fmt_pct(d.get(f"{k}_margin")) for k in keys])

@@ -363,4 +363,114 @@ with mock.patch.object(updater, "_open", lambda url, t: _Resp(b"{}" if "latest.j
     assert updater.newer_available() is None                                   # same version: nothing to do
 
 assert lic.THIS_PRODUCT == 2
+import datetime
+from unittest import mock
+# ---------------- security (v-sec): passwords, lockout, files, exports, restore, updates
+from app import security as sec
+from app.db import Database as _DB
+_h = sec.hash_pw("Corner$tore9")
+assert _h.startswith("pbkdf2_sha256$600000$") and sec.check_pw("Corner$tore9", _h) and not sec.check_pw("corner$tore9", _h)
+assert not sec.check_pw("x", "") and not sec.check_pw("x", "garbage") and not sec.check_pw("x", "a$b$c$d")
+_legacy = sec.hash_pw("oldpass1", "abcd1234", rounds=sec.LEGACY_ROUNDS).split("$", 3)
+_legacy = f"{_legacy[2]}${_legacy[3]}"                    # old 'salt$hash' format from earlier versions
+assert sec.check_pw("oldpass1", _legacy) and sec.needs_rehash(_legacy) and not sec.needs_rehash(_h)
+for bad in ("admin", "short", "password", "aaaaaaaaaa", " spaced pw ", "Cashier01"):
+    assert sec.password_problem(bad, "cashier01"), bad
+assert sec.password_problem("Blue-Moon-42", "admin") is None
+_sdb = _DB()
+_sdb.conn.execute("DELETE FROM users WHERE username='legacy'")
+_sdb.conn.execute("INSERT INTO users(username,pw,role,created_at) VALUES ('legacy',?,'clerk','x')", (_legacy,))
+_u = _sdb.verify_user("legacy", "oldpass1")
+assert _u and "pw" not in _u                               # password hash never handed to the screens
+assert _sdb.conn.execute("SELECT pw FROM users WHERE username='legacy'").fetchone()[0].startswith("pbkdf2_sha256$600000$")
+assert _sdb.verify_user("legacy", "oldpass1") and not _sdb.verify_user("legacy", "nope") and not _sdb.verify_user("ghost", "x")
+assert not _sdb.verify_user("legacy' OR '1'='1", "x") and not _sdb.verify_user("x", "' OR '1'='1")   # SQL injection
+# lockout: 5 wrong -> 60 s, then 120 s; success clears
+_t0 = datetime.datetime(2026, 11, 1, 12, 0, 0)
+sec.record_success(_sdb, "legacy")
+for i in range(4):
+    assert sec.record_failure(_sdb, "legacy", _t0) == 0
+assert sec.record_failure(_sdb, "legacy", _t0) == 60 and sec.locked_for(_sdb, "Legacy ", _t0) == 60
+assert sec.locked_for(_sdb, "legacy", _t0 + datetime.timedelta(seconds=61)) == 0
+for i in range(5):
+    s2 = sec.record_failure(_sdb, "legacy", _t0 + datetime.timedelta(seconds=70))
+assert s2 == 120
+sec.record_success(_sdb, "legacy")
+assert sec.locked_for(_sdb, "legacy", _t0) == 0 and sec.locked_for(_sdb, "nobody") == 0
+_sdb.conn.execute("DELETE FROM users WHERE username='legacy'")
+_sdb.conn.commit()
+# exports: text that looks like a formula is made harmless; numbers untouched
+assert sec.safe_cell("=HYPERLINK(\"http://x\")") == "'=HYPERLINK(\"http://x\")" and sec.safe_cell("@SUM(A1)") == "'@SUM(A1)"
+assert sec.safe_cell(-5.5) == -5.5 and sec.safe_cell("MARLBORO") == "MARLBORO" and sec.safe_cell(None) is None
+assert sec.pdf_text("A&B <x>") == "A&amp;B &lt;x&gt;"
+_evil_id = _sdb.add_product({"description": "=cmd|'/c calc'!A1", "category": _sdb.list_products()[0]["category"],
+                             "net": 10, "case_units": 24, "notes": "<font size=90>big</font>"})
+_ex = os.path.join(tmp, "sec.csv")
+io_utils.export_csv(_ex, _sdb.list_products())
+assert "'=cmd" in open(_ex, encoding="utf-8-sig").read()
+_exx = os.path.join(tmp, "sec.xlsx")
+io_utils.export_xlsx(_exx, _sdb.list_products())
+import openpyxl as _ox
+_vals = [c.value for ws in _ox.load_workbook(_exx).worksheets for row in ws.iter_rows() for c in row]
+assert "'=cmd|'/c calc'!A1" in _vals and not any(isinstance(v, str) and v.startswith("=") for v in _vals)
+io_utils.export_pdf(os.path.join(tmp, "sec.pdf"), _sdb.list_products(), "Test <b>&</b>")
+_sdb.delete_products([_evil_id]) if hasattr(_sdb, "delete_products") else _sdb.conn.execute("DELETE FROM products WHERE id=?", (_evil_id,))
+_sdb.conn.commit()
+# files: wrong type / empty / fake Excel / too big / too many rows refused
+for name, data in (("a.exe", b"MZ"), ("b.csv", b""), ("c.xlsx", b"not a zip")):
+    _p = os.path.join(tmp, name)
+    open(_p, "wb").write(data)
+    try:
+        io_utils.read_file(_p)
+        raise SystemExit(f"accepted {name}")
+    except ValueError:
+        pass
+_big = os.path.join(tmp, "big.csv")
+with open(_big, "w") as f:
+    f.write("Description,Net\n" + "x,1\n" * (sec.MAX_IMPORT_ROWS + 1))
+try:
+    io_utils.read_file(_big)
+    raise SystemExit("huge file accepted")
+except ValueError:
+    pass
+assert sec.clean_text("ab\x00c\x1b" + "z" * 900) == "abc" + "z" * (sec.MAX_TEXT - 3)
+# restore: non-SQLite file and a backup with a planted trigger are refused, data unchanged
+_cnt = len(_sdb.list_products())
+_junk = os.path.join(tmp, "junk.db")
+open(_junk, "wb").write(b"hello" * 100)
+_trig = os.path.join(tmp, "trig.db")
+_sdb.backup(_trig)
+import sqlite3 as _sql3
+_c = _sql3.connect(_trig)
+_c.execute("CREATE TRIGGER t AFTER INSERT ON products BEGIN DELETE FROM users; END")
+_c.commit()
+_c.close()
+for bad in (_junk, _trig):
+    try:
+        _sdb.restore(bad)
+        raise SystemExit(f"restore accepted {bad}")
+    except ValueError:
+        pass
+assert len(_sdb.list_products()) == _cnt
+# updates: only GitHub over HTTPS; a missing fingerprint or odd file name is refused before downloading
+from app import updater as _up
+for ok in ("https://raw.githubusercontent.com/a/b/main/x.exe", "https://api.github.com/repos/a/b/releases",
+           "https://github.com/a/b/releases/download/v1/x.exe", "https://objects.githubusercontent.com/x"):
+    assert _up.allowed_url(ok), ok
+for bad in ("http://raw.githubusercontent.com/x", "https://evil.com/x.exe", "https://github.com.evil.com/x",
+            "https://user:pw@github.com/x", "https://github.com:8443/x", "file:///C:/x.exe", "https://127.0.0.1/x",
+            "https://169.254.169.254/latest", "ftp://github.com/x"):
+    assert not _up.allowed_url(bad), bad
+_good = {"name": _up.ASSET_PREFIX + "9.9.9.exe", "url": "https://raw.githubusercontent.com/a/b/main/x.exe",
+         "sha256": "0" * 64, "size": 10}
+for bad in ({**_good, "sha256": None}, {**_good, "sha256": "abc"}, {**_good, "name": "..\\..\\evil.exe"},
+            {**_good, "url": "https://evil.com/x.exe"}, {**_good, "size": 10 ** 10}):
+    with mock.patch.object(_up, "_opener") as _op:
+        try:
+            _up.download(bad)
+            raise SystemExit(f"download accepted {bad}")
+        except IOError:
+            pass
+        assert not _op.open.called
+print("security tests passed")
 print("ALL TESTS PASSED")
