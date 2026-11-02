@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import calc, io_utils, labels, pricing, security
 from . import license as lic
 from . import updater
+from . import vault
 from .license_ui import LicenseDialog, startup_gate
 from .chatbot import ChatBot
 from .db import AUDIT_KINDS, BACKUP_KEEP
@@ -146,6 +147,18 @@ class LoginDialog(tk.Toplevel):
                 return
             self.db.set_password(u["username"], new)
             self.db.log("Changed own password (required at sign-in)", u["username"], "user")
+        if u["role"] == "admin" and not self.db.has_backup_password():
+            bp = ask_new_password(self, "Set a backup password", "",
+                                  "Your data is now encrypted and locked to this Windows user.\n\n"
+                                  "Choose a BACKUP PASSWORD. You'll need it to open your backups (or this data folder) "
+                                  "on another computer. Write it down and keep it safe - nobody can recover it.")
+            if bp:
+                self.db.set_backup_password(bp, u["username"])
+                messagebox.showinfo("Backup password set", "Backup password saved. Keep it somewhere safe.", parent=self)
+            else:
+                messagebox.showwarning("No backup password", "Without a backup password your backups only open on this "
+                                       "computer. You'll be asked again next time (or set it on the Backup page).",
+                                       parent=self)
         self.db.set_setting("remember_user", u["username"] if self.remember.get() else "")
         self.db.log(f"Signed in ({u['role']})", u["username"], "login")
         self.user = u
@@ -1825,6 +1838,11 @@ class App(tk.Tk):
         self._action_row(body, "Back up now", "Saves everything (products, prices, users, settings, audit log and price history) "
                          "into one .db file.\nCopy it to a USB stick or cloud folder to carry your data to another computer.",
                          [("Back up now…", self._backup_now, "Accent.TButton")])
+        self._action_row(body, "Backup password", "Your data and backups are encrypted. The backup password is needed to "
+                                                  "open a backup (or this data folder) on another computer.",
+                         [("Set backup password…", self._set_backup_password, "TButton")])
+        self.bp_status = tk.Label(body, text="", font=FONT_B, bg=PANEL, anchor="w")
+        self.bp_status.pack(anchor="w", pady=(0, 4))
         self._action_row(body, "Restore from a backup", "Replaces the current data with a backup file. The file is checked first, "
                          "and a safety backup of the current data is saved.\nBackups from older versions are upgraded automatically.",
                          [("Restore from file…", self._restore, "Danger.TButton")])
@@ -1868,6 +1886,10 @@ class App(tk.Tk):
         return "Other"
 
     def _refresh_backups(self):
+        if hasattr(self, "bp_status"):
+            has = self.db.has_backup_password()
+            self.bp_status.config(text="🔒 Encrypted.  Backup password: " + ("set" if has else "NOT SET - please set one"),
+                                  fg="#2e7d32" if has else "#c62828")
         self.backup_tree.delete(*self.backup_tree.get_children())
         for name, when, size in self.db.list_backups():
             self.backup_tree.insert("", "end", iid=name, values=(name, when, self._backup_reason(name), f"{size / 1024:.0f} KB"))
@@ -1880,6 +1902,22 @@ class App(tk.Tk):
             who = getattr(self, "user", None) or {"username": "license screen"}
             self.db.log(f"Backup created: {path}", who["username"], "backup")
             messagebox.showinfo("Backup saved", f"Backup saved to\n{path}")
+
+    def _ask_backup_password(self, msg=None):
+        return simpledialog.askstring("Backup password", (f"{msg}\n\n" if msg else "") +
+                                      "This backup was made on another computer.\nEnter its backup password:",
+                                      show="•", parent=self)
+
+    def _set_backup_password(self):
+        if not self._need_admin("set the backup password"):
+            return
+        pw = ask_new_password(self, "Backup password", "", "Needed to open your backups on another computer. "
+                              "Write it down - nobody can recover it.\nBackups made before this change still use "
+                              "the old backup password.")
+        if pw:
+            self.db.set_backup_password(pw, self.user["username"])
+            messagebox.showinfo("Backup password", "Backup password saved. Keep it somewhere safe.")
+            self._refresh_backups()
 
     def _restore_selected(self):
         sel = self.backup_tree.selection()
@@ -1896,7 +1934,9 @@ class App(tk.Tk):
             return
         user = self.user["username"]
         try:
-            safety = self.db.restore(path)
+            safety = self.db.restore(path, ask_password=self._ask_backup_password)
+        except vault.NeedPassword:
+            return
         except Exception as ex:
             self.db.log(f"Restore from {os.path.basename(path)} refused: {ex}", user, "backup")
             messagebox.showerror("Restore failed", str(ex))

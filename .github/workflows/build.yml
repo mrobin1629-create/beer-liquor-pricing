@@ -1,10 +1,12 @@
 # Builds the Windows setup file on GitHub's Windows computers.
-# Runs on every push to main (and from the Actions tab). When APP_VERSION in app/config.py is new,
-# it also creates a release "vX.Y.Z" with the setup file.
+# The program is compiled to machine code with Nuitka (much harder to take apart than packed Python), then the
+# finished program runs its own self-test on Windows (encryption, Windows key lock, PDFs, Excel, screen).
+# Runs on every push to main and to test/* branches. Only main makes releases: when APP_VERSION in
+# app/config.py is new, it creates a release "vX.Y.Z" with the setup file.
 name: Build Windows setup
 on:
   push:
-    branches: [main]
+    branches: [main, "test/**"]
   workflow_dispatch:
 permissions:
   contents: write
@@ -36,11 +38,30 @@ jobs:
           "new=$new" >> $env:GITHUB_OUTPUT
           Write-Host "Version $v (new release: $new)"
       - name: Install tools
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt "nuitka==4.3.4"
       - name: Run tests
         run: python tests/test_core.py
-      - name: Build program
-        run: python -m PyInstaller --noconfirm --windowed --name BevMargin --icon assets\app.ico --add-data "assets;assets" --collect-submodules reportlab.graphics.barcode --hidden-import cryptography --hidden-import defusedxml main.py
+      - name: Build program (compiled with Nuitka)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}.0"
+          python -m nuitka --standalone --assume-yes-for-downloads --msvc=latest --windows-console-mode=disable `
+            --enable-plugin=tk-inter --include-package=app --include-package=reportlab.graphics.barcode `
+            --include-package-data=reportlab --include-package=defusedxml --include-data-dir=assets=assets `
+            --windows-icon-from-ico=assets\app.ico --company-name="Robin Mishra" `
+            --product-name="Beer and Liquor Pricing" --file-description="Beer and Liquor Pricing" `
+            --file-version=$v --product-version=$v --copyright="Copyright (C) 2026 Robin Mishra" `
+            --output-dir=build_n --output-filename=BevMargin.exe main.py
+          if ($LASTEXITCODE -ne 0) { throw "Nuitka build failed" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Move-Item build_n\main.dist dist\BevMargin
+      - name: Self-test the built program on Windows
+        shell: pwsh
+        run: |
+          $out = "$pwd\selftest.json"
+          $p = Start-Process dist\BevMargin\BevMargin.exe -ArgumentList "--selftest", "`"$out`"" -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out } else { Write-Host "no result file" }
+          if ($p.ExitCode -ne 0) { throw "Self-test failed (exit $($p.ExitCode))" }
       - name: Build setup file
         shell: pwsh
         run: |
@@ -50,18 +71,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
           Get-ChildItem Output
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: windows-setup-${{ steps.ver.outputs.version }}
           path: |
             Output/*.exe
+            selftest.json
       - name: Private release (setup file)
-        if: steps.ver.outputs.new == 'true'
+        if: steps.ver.outputs.new == 'true' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           $setup = (Get-ChildItem Output\*.exe | Select-Object -First 1).FullName
           gh release create "v${{ steps.ver.outputs.version }}" "$setup" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "v${{ steps.ver.outputs.version }}" --notes-file RELEASE_NOTES.md
       - name: Publish setup file to the public downloads page (optional token)
-        if: steps.ver.outputs.new == 'true' && env.HAS_DOWNLOADS_TOKEN == 'true'
+        if: steps.ver.outputs.new == 'true' && env.HAS_DOWNLOADS_TOKEN == 'true' && github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.DOWNLOADS_TOKEN }}

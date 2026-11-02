@@ -8,16 +8,12 @@ HOW UPDATES KEEP YOUR DATA
 """
 import contextlib
 import datetime
-import glob
 import os
-import pathlib
-import shutil
-import sqlite3
 
 from . import calc
-from .config import backup_dir, db_path
+from .config import db_path
+from .vault import BACKUP_KEEP, VaultMixin
 
-BACKUP_KEEP = 30          # newest database backups kept in the backups folder
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS products(
@@ -126,7 +122,7 @@ def now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-from .security import MAX_BACKUP_BYTES, check_file, check_pw, hash_pw, needs_rehash  # noqa: E402
+from .security import check_pw, hash_pw, needs_rehash  # noqa: E402
 
 
 def _same(a, b):
@@ -135,20 +131,18 @@ def _same(a, b):
     return abs(float(a) - float(b)) < 1e-9
 
 
-class Database:
-    def __init__(self, path=None):
+class Database(VaultMixin):
+    APP_LABEL = "Beer and Liquor Pricing"
+
+    def __init__(self, path=None, ask_password=None):
         self.path = path or db_path()
+        self.ask_password = ask_password
         self._depth = 0          # >0 while inside transaction(): commits are held back
         self._open()
 
     # ---------- setup ----------
-    def _open(self):
-        is_new = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
-        self.conn = sqlite3.connect(self.path)
-        self.conn.row_factory = sqlite3.Row
+    def _after_connect(self):
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self._migrate(is_new)
-        self.startup_ok = self.conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
 
     def _migrate(self, is_new):
         c = self.conn
@@ -421,64 +415,6 @@ class Database:
         self.conn.execute("DELETE FROM users WHERE id=?", (uid,))
         self._commit()
 
-    # ---------- backup / restore ----------
-    def backup(self, dest):
-        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        self.conn.commit()
-        out = sqlite3.connect(dest)
-        with out:
-            self.conn.backup(out)
-        out.close()
-        return dest
-
-    def safety_backup(self, reason):
-        """Backup into the backups folder, then keep only the newest BACKUP_KEEP."""
-        dest = self.backup(os.path.join(backup_dir(), f"{reason}-{self._stamp()}.db"))
-        self.prune_backups()
-        return dest
-
-    def prune_backups(self, keep=BACKUP_KEEP):
-        files = sorted(glob.glob(os.path.join(backup_dir(), "*.db")), key=os.path.getmtime, reverse=True)
-        for old in files[keep:]:
-            try:
-                os.remove(old)
-            except OSError:
-                pass
-
-    def auto_backup(self):
-        return self.safety_backup("auto")
-
-    def list_backups(self):
-        files = sorted(glob.glob(os.path.join(backup_dir(), "*.db")), key=os.path.getmtime, reverse=True)
-        return [(os.path.basename(f), datetime.datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M"),
-                 os.path.getsize(f)) for f in files]
-
-    def restore(self, src):
-        check_file(src, MAX_BACKUP_BYTES)
-        with open(src, "rb") as f:
-            if f.read(16) != b"SQLite format 3\x00":
-                raise ValueError("That file is not a Beer and Liquor Pricing backup.")
-        test = sqlite3.connect(pathlib.Path(src).resolve().as_uri() + "?mode=ro", uri=True)
-        try:
-            ok = test.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'").fetchone()
-            if test.execute("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger','view')").fetchone()[0]:
-                raise ValueError("That backup file contains extra database code this app never creates, "
-                                 "so it was refused. Nothing was changed.")
-            healthy = test.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        except sqlite3.DatabaseError:
-            ok, healthy = False, False
-        finally:
-            test.close()
-        if not ok:
-            raise ValueError("That file is not a Beer and Liquor Pricing backup.")
-        if not healthy:
-            raise ValueError("That backup file is damaged (failed the SQLite integrity check). Nothing was changed.")
-        safety = self.safety_backup("before-restore")
-        self.conn.close()
-        shutil.copyfile(src, self.path)
-        self._open()           # also upgrades an older backup to the current schema
-        return safety
-
     # ---------- health check ----------
     def health_check(self):
         """Returns (ok, [lines]). Problems start with 'PROBLEM', notes with 'Note'."""
@@ -528,6 +464,9 @@ class Database:
             lines.append(f"Backups: {len(backups)} kept (max {BACKUP_KEEP}), newest {backups[0][1]}")
         else:
             lines.append("Note: no backups yet. Use Back up now, or close the app once to make one.")
+        enc = self.encryption_lines()
+        ok = ok and not any(x.startswith("PROBLEM") for x in enc)
+        lines += enc
         lines.append(f"Database file: {self.path} ({os.path.getsize(self.path) / 1024:.0f} KB)")
         return ok, lines
 

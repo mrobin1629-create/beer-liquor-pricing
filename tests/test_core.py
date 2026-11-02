@@ -439,9 +439,10 @@ _cnt = len(_sdb.list_products())
 _junk = os.path.join(tmp, "junk.db")
 open(_junk, "wb").write(b"hello" * 100)
 _trig = os.path.join(tmp, "trig.db")
-_sdb.backup(_trig)
 import sqlite3 as _sql3
 _c = _sql3.connect(_trig)
+_c.execute("CREATE TABLE products(id INTEGER PRIMARY KEY, description TEXT)")
+_c.execute("CREATE TABLE users(id INTEGER PRIMARY KEY)")
 _c.execute("CREATE TRIGGER t AFTER INSERT ON products BEGIN DELETE FROM users; END")
 _c.commit()
 _c.close()
@@ -473,4 +474,94 @@ for bad in ({**_good, "sha256": None}, {**_good, "sha256": "abc"}, {**_good, "na
             pass
         assert not _op.open.called
 print("security tests passed")
+import shutil, tempfile
+from app.config import backup_dir
+# ---------------- encryption (data file + backups locked; backup password to move computers)
+from app import vault as _v
+_raw = open(_sdb.path, "rb").read()
+_some = _sdb.list_products()[0]["description"].encode()
+assert not _raw.startswith(b"SQLite format 3") and _some not in _raw          # no readable data in the file
+assert os.path.exists(_v.KeyFile(_sdb.path).path)
+_bk = os.path.join(tmp, "enc-backup.db")
+_sdb.backup(_bk)
+_bb = open(_bk, "rb").read()
+assert _bb.startswith(_v.MAGIC) and _some not in _bb
+assert _sdb.restore(_bk) and len(_sdb.list_products()) == _cnt                 # same computer: no password needed
+# plain old (pre-encryption) backup files can still be restored
+_plain = os.path.join(tmp, "old-plain.db")
+_pc = _v.connect(_sdb.path, _sdb._key)
+_pc.execute("ATTACH DATABASE ? AS p KEY ''", (_plain,))
+_pc.execute("SELECT sqlcipher_export('p')").fetchall()
+_pc.execute("DETACH DATABASE p")
+_pc.close()
+assert open(_plain, "rb").read(16) == b"SQLite format 3\x00"
+_sdb.restore(_plain)
+assert len(_sdb.list_products()) == _cnt
+# another computer: its own key. Without a backup password its backups can't be opened here
+_other_dir = tempfile.mkdtemp()
+_other = Database(os.path.join(_other_dir, "o.db"))
+_other.conn.execute("UPDATE products SET description='FROM OTHER PC' WHERE id=(SELECT MIN(id) FROM products)")
+_other.conn.commit()
+_ob = os.path.join(tmp, "other.db")
+_other.backup(_ob)
+try:
+    _sdb.restore(_ob, ask_password=lambda m: "x")
+    raise SystemExit("foreign backup without password opened")
+except ValueError:
+    pass
+assert sec.password_problem("Shop-Safe-2026") is None
+_other.set_backup_password("Shop-Safe-2026")
+_other.backup(_ob)
+for asker in (None, lambda m: None):
+    try:
+        _sdb.restore(_ob, ask_password=asker)
+        raise SystemExit("restored without password")
+    except _v.NeedPassword:
+        pass
+_tries = iter(["wrong one", "Shop-Safe-2026"])
+_msgs = []
+_sdb.restore(_ob, ask_password=lambda m: (_msgs.append(m), next(_tries))[1])
+assert _msgs == [None, "That backup password is not correct."]
+assert any(p["description"] == "FROM OTHER PC" for p in _sdb.list_products())
+_sdb.restore(_bk)                                                     # back to our own data
+# data folder copied to a new computer / Windows account: Windows can't unlock the key -> backup password
+_other.close()
+_kf = _v.KeyFile(os.path.join(_other_dir, "o.db"))
+_d = _kf.load()
+_d["local"] = {"by": "dpapi", "data": "bG9ja2VkIGVsc2V3aGVyZQ=="}      # locked by another account: can't unlock here
+open(_kf.path, "w").write(_json.dumps(_d))
+try:
+    Database(os.path.join(_other_dir, "o.db"))
+    raise SystemExit("opened without password")
+except _v.NeedPassword:
+    pass
+_tries = iter(["nope", "Shop-Safe-2026"])
+_moved = Database(os.path.join(_other_dir, "o.db"), ask_password=lambda m: next(_tries))
+assert any(p["description"] == "FROM OTHER PC" for p in _moved.list_products())
+_moved.close()
+assert Database(os.path.join(_other_dir, "o.db")).list_products()            # re-locked to this account: no prompt now
+# key file lost: the locked data file is kept aside and a fresh one starts (so a backup can be restored)
+os.remove(_kf.path)
+_fresh = Database(os.path.join(_other_dir, "o.db"))
+assert _fresh.locked_aside and os.path.exists(_fresh.locked_aside)
+_fresh.close()
+# one-time upgrade: an old unencrypted data file AND its unencrypted backups get encrypted
+_up_dir = tempfile.mkdtemp()
+_up_db = os.path.join(_up_dir, "u.db")
+shutil.copyfile(_plain, _up_db)
+_old_bak = os.path.join(backup_dir(), "auto-20200101-000000-000.db")
+shutil.copyfile(_plain, _old_bak)
+_u = Database(_up_db)
+assert not open(_up_db, "rb").read(16).startswith(b"SQLite") and len(_u.list_products()) == _cnt
+assert open(_old_bak, "rb").read(len(_v.MAGIC)) == _v.MAGIC
+assert any("encrypted" in r["action"] for r in _u.audit_log("security"))
+_u.restore(_old_bak)                                                  # converted backup still restores
+assert len(_u.list_products()) == _cnt
+_u.close()
+try:
+    _sdb.restore(_old_bak)                                            # ...but not into a different store
+    raise SystemExit("other store's backup opened")
+except ValueError:
+    pass
+print("encryption tests passed")
 print("ALL TESTS PASSED")
