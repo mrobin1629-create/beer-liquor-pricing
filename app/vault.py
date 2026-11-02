@@ -466,8 +466,16 @@ class VaultMixin:
                 raise ValueError("That backup file is damaged (failed the integrity check). Nothing was changed.")
             export_to(test, newfile, self._key)
         safety = self.safety_backup("before-restore")
+        try:
+            src = connect(newfile, self._key)       # copied in page by page through SQLite itself, so it works
+            try:                                    # even while Windows has the data file open
+                src.backup(self.conn)
+            finally:
+                src.close()
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(newfile)
         self.conn.close()
-        os.replace(newfile, self.path)
         self._open()           # also upgrades an older backup to the current schema
         return safety
 
