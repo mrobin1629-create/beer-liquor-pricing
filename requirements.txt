@@ -4,3 +4,4 @@ pyinstaller>=6.0
 cryptography>=41
 defusedxml>=0.7.1
 sqlcipher3-wheels==0.5.7
+pypdf==5.4.0

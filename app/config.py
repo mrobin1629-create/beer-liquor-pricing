@@ -12,7 +12,7 @@ import sys
 
 APP_NAME = "Beer and Liquor Pricing"
 APP_SHORT = "BevMargin"
-APP_VERSION = "1.5.2"          # bump this for every release (and MyAppVersion in installer.iss)
+APP_VERSION = "1.5.3"          # bump this for every release (and MyAppVersion in installer.iss)
 DEVELOPER = "Robin Mishra"
 CREDIT = "Developed by Robin Mishra  •  Copyright © 2026"
 

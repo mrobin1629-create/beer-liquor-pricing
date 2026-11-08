@@ -186,6 +186,16 @@ class Database(VaultMixin):
         if self._depth == 0:
             self.conn.commit()
 
+    on_change = None            # set by the screen: called with [(field, old, new)] after a single save (sound effects)
+
+    def notify(self, changes=()):
+        """Tells the screen something was saved. Silent inside an import / bulk change (one sound at the end)."""
+        if self.on_change and not self._depth:
+            try:
+                self.on_change(list(changes))
+            except Exception:
+                pass
+
     @contextlib.contextmanager
     def transaction(self):
         """All writes inside are saved together, or none are (rolled back on any error)."""
@@ -308,6 +318,7 @@ class Database(VaultMixin):
         cur = self.conn.execute(f"INSERT INTO products({cols}) VALUES ({','.join('?' * len(d))})",
                                 list(d.values()))
         self._commit()
+        self.notify()
         if log:
             self.log(f"Added {d.get('description', '')} ({d.get('category') or 'Beer'})", user, "product")
         return cur.lastrowid
@@ -331,6 +342,7 @@ class Database(VaultMixin):
                     (now(), pid, old.get("item_no"), d.get("description", old.get("description")),
                      d.get("category", old.get("category")), f, old.get(f), d[f], user, source))
         self._commit()
+        self.notify(changes)
         if log:
             self.log(f"Updated {d.get('description', old.get('description', ''))} "
                      f"({d.get('category', old.get('category', ''))})"
@@ -344,6 +356,7 @@ class Database(VaultMixin):
                 self.conn.execute("DELETE FROM products WHERE id=?", (pid,))
                 if p:
                     self.log(f"Deleted {p['description']} ({p['category']}), Item# {p['item_no'] or '-'}", user, "product")
+        self.notify()
 
     def price_history(self, product_id=None, search="", limit=2000):
         sql, args = "SELECT * FROM price_history WHERE 1=1", []

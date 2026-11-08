@@ -47,7 +47,7 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}.0"
           python -m nuitka --standalone --assume-yes-for-downloads --msvc=latest --windows-console-mode=disable `
             --enable-plugin=tk-inter --include-package=app --include-package=reportlab.graphics.barcode `
-            --include-package-data=reportlab --include-package=defusedxml --include-data-dir=assets=assets `
+            --include-package-data=reportlab --include-package=defusedxml --include-package=pypdf --include-data-dir=assets=assets `
             --windows-icon-from-ico=assets\app.ico --company-name="Robin Mishra" `
             --product-name="Beer and Liquor Pricing" --file-description="Beer and Liquor Pricing" `
             --file-version=$v --product-version=$v --copyright="Copyright (C) 2026 Robin Mishra" `

@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import calc, io_utils, labels, pricing, security
+from . import calc, io_utils, labels, pricing, security, sounds
 from . import license as lic
 from . import updater
 from . import vault
@@ -970,6 +970,8 @@ class App(tk.Tk):
     def __init__(self, db):
         super().__init__()
         self.db = db
+        sounds.set_enabled(db.get_setting("sounds", "1") == "1")
+        db.on_change = lambda changes: sounds.play(sounds.for_changes(changes))      # up / down / saved
         self.bot = ChatBot(db)
         self.logged_out = False
         self.withdraw()
@@ -1346,6 +1348,7 @@ class App(tk.Tk):
         p = self.db.find_by_upc(code)
         if not p:
             self._flash(f"✖ {code} not found", ok=False)
+            sounds.play("error")
             if messagebox.askyesno("Not found", f"No product has UPC or Item# {code}.\n\nAdd it as a new product?"):
                 dlg = ProductDialog(self, category=self.active_cat, preset={"upc": code})
                 self.wait_window(dlg)
@@ -1483,15 +1486,28 @@ class App(tk.Tk):
     # ---------- files ----------
     def do_import(self):
         """Safer import: read -> check every row -> show problems -> backup -> one transaction."""
-        path = filedialog.askopenfilename(title="Import products", filetypes=[("Excel or CSV", "*.xlsx *.xlsm *.csv"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(title="Import products or a supplier invoice",
+                                          filetypes=[("Excel, CSV or PDF invoice", "*.xlsx *.xlsm *.csv *.pdf"),
+                                                     ("Supplier invoice PDF", "*.pdf"), ("All files", "*.*")])
         if not path:
             return
         name = os.path.basename(path)
         try:
-            items = io_utils.read_file(path, default_category=self.active_cat)
-            adds, updates, problems = io_utils.plan_import(self.db, items)
+            if path.lower().endswith(".pdf"):
+                items, pdf, notes = io_utils.read_pdf_invoice(path)
+                adds, updates, problems = io_utils.plan_import(self.db, items)
+                problems = notes + problems
+                name = f"{name} ({pdf['supplier']} invoice {pdf['invoice_no']}, {pdf['date']})"
+                if not pdf["ok"]:
+                    sounds.play("warning")
+                    messagebox.showwarning("Check this invoice", "The lines read from this PDF don't add up to the "
+                                           "invoice's printed total. Look over the lines on the next screen before importing.")
+            else:
+                items = io_utils.read_file(path, default_category=self.active_cat)
+                adds, updates, problems = io_utils.plan_import(self.db, items)
         except Exception as ex:
             self.db.log(f"Import of {name} failed to read: {ex}", self.user["username"], "import")
+            sounds.play("error")
             messagebox.showerror("Import failed", f"Couldn't read {name}:\n{ex}\n\nNothing was changed.")
             return
         if not adds and not updates:
@@ -1507,6 +1523,7 @@ class App(tk.Tk):
             backup = io_utils.apply_import(self.db, adds, updates, self.user["username"], name)
         except Exception as ex:
             self.db.log(f"Import of {name} FAILED and was rolled back: {ex}", self.user["username"], "import")
+            sounds.play("error")
             messagebox.showerror("Import failed", f"Something went wrong:\n{ex}\n\nNothing was changed "
                                                    "(the import was rolled back).")
             return
@@ -1514,6 +1531,7 @@ class App(tk.Tk):
         skipped = sum(1 for x in problems if ": skipped" in x)
         cost_rows = pricing.cost_changes(self.db, start_ts, source=f"import {name}")
         below = sum(r["below"] for r in cost_rows)
+        sounds.play("success")
         messagebox.showinfo("Import finished", f"{len(adds)} added, {len(updates)} updated, {skipped} skipped.\n\n"
                                                f"A backup was saved first:\n{os.path.basename(backup)}"
                                                + (f"\n\n⚠ Costs changed on {len({r['product']['id'] for r in cost_rows})} "
@@ -1590,8 +1608,12 @@ class App(tk.Tk):
         txt.pack(side="left", fill="x", expand=True, padx=14, pady=10)
         tk.Label(txt, text=title, font=FONT_B, bg=PANEL, fg=NAVY).pack(anchor="w")
         tk.Label(txt, text=desc, font=("Segoe UI", 9), bg=PANEL, fg=GREY_FG, justify="left").pack(anchor="w")
+        made = []
         for text, cmd, style in reversed(btns):
-            ttk.Button(row, text=text, command=cmd, style=style).pack(side="right", padx=(0, 12))
+            b = ttk.Button(row, text=text, command=cmd, style=style)
+            b.pack(side="right", padx=(0, 12))
+            made.insert(0, b)
+        self._last_action_buttons = made
 
     def _page_reports(self):
         page, _, body = self._simple_page("Reports (PDF)", "▤")
@@ -2029,7 +2051,29 @@ class App(tk.Tk):
         self._action_row(body, "Updates", "Downloads and installs the newest version (needs internet). Your data, "
                                           "license and settings are kept; a backup is made first.",
                          [("⬆ Check for updates", lambda: self._check_updates(manual=True), "Accent.TButton")])
+        self._action_row(body, "Sound effects", "A buzz when a scan finds nothing, a chime when an import finishes, a "
+                                                "rising tone when a price or cost goes up, a falling tone when it goes "
+                                                "down, and a click when something is saved.",
+                         [("🔊 Turn sounds off" if sounds.enabled() else "🔇 Turn sounds on", None, "TButton"),
+                          ("▶ Test sounds", self._test_sounds, "TButton")])
+        self.sound_btn = self._last_action_buttons[0]
+        self.sound_btn.config(command=self._toggle_sounds)
         return page
+
+    def _toggle_sounds(self):
+        on = not sounds.enabled()
+        sounds.set_enabled(on)
+        self.db.set_setting("sounds", "1" if on else "0")
+        self.sound_btn.config(text="🔊 Turn sounds off" if on else "🔇 Turn sounds on")
+        if on:
+            sounds.play("success")
+
+    def _test_sounds(self):
+        if not sounds.enabled():
+            messagebox.showinfo("Sound effects", "Sounds are off. Click 'Turn sounds on' first.")
+            return
+        for i, name in enumerate(("error", "success", "up", "down", "saved")):
+            self.after(i * 700, lambda n=name: (sounds.play(n), self._flash(f"♪ {n}")))
 
     # ---------- updates ----------
     def _bg(self, fn, done):

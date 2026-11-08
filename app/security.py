@@ -130,6 +130,10 @@ def check_file(path, max_bytes, kinds=None):
         with open(path, "rb") as f:
             if f.read(2) != b"PK":
                 raise ValueError("That file is not a real Excel (.xlsx) file.")
+    if kinds and os.path.splitext(path)[1].lower() == ".pdf":
+        with open(path, "rb") as f:
+            if b"%PDF" not in f.read(1024):
+                raise ValueError("That file is not a real PDF.")
     return size
 
 

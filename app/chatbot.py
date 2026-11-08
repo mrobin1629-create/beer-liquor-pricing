@@ -86,6 +86,16 @@ HELP_TOPICS = [
      "After 5 wrong passwords, sign-in pauses for 1 minute (longer if it keeps happening). "
      "To change yours: Users > Change my password (asks for your current one). "
      "Forgot it? An admin can use Users > Reset password."),
+    (("pdf", "invoice pdf", "import pdf", "glazer", "southern", "fischer", "wil fischer"),
+     "Import a supplier invoice PDF with Import and pick the PDF. Known layouts: Southern Glazer's (goes to Liquor) and "
+     "Wil Fischer (goes to Beer); HUB KCCC tobacco invoices go in the Tobacco app. The app reads every line (Item#, "
+     "description with size, cases, price, net after discount, deposit, UPC, bottles per case), checks them against "
+     "the invoice's printed totals and shows the Import check screen before saving. Scanned (picture) PDFs can't be "
+     "read - ask the supplier for the real PDF or Excel file."),
+    (("sound", "sounds", "beep", "noise", "mute", "chime"),
+     "Sound effects: a buzz when a scan finds nothing or something fails, a chime when an import finishes, a rising "
+     "tone when a price or cost goes up, a falling tone when it goes down, and a click when something is saved. "
+     "Turn them off or test them on the About page."),
     (("license", "licence", "registration", "trial", "computer id", "activate", "key"),
      "The app has a 14-day free trial. To keep using it, go to About > License, copy your Computer ID (or click "
      "'Copy request message') and send it to Robin Mishra. Paste the key you get back and click Activate. "

@@ -1,4 +1,12 @@
-# Beer and Liquor Pricing - Version 1.5.2 (data protection update)
+# Beer and Liquor Pricing - Version 1.5.3
+
+- Import supplier invoice PDFs with Import: Southern Glazer's (to Liquor - item, size, cases, price, net, UPC, bottles
+  per case) and Wil Fischer (to Beer - item, cases, price, net after discount, deposit, cans per case). Every line is
+  checked against the invoice's printed totals before anything is saved.
+- Sound effects: buzz when a scan finds nothing or something fails, chime when an import finishes, rising tone when a
+  price or cost goes up, falling tone when it goes down, click when something is saved. On/off and Test on About.
+
+## Version 1.5.2 (data protection update)
 
 - Your data file and backups are now encrypted (AES-256). The key is locked to your Windows user, so nothing
   extra to type each day, and a copied or stolen data file can't be read.

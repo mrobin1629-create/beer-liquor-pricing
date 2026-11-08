@@ -347,3 +347,54 @@ def apply_import(db, adds, updates, user, filename):
         db.log(f"Imported {filename}: {len(adds)} added, {len(updates)} updated, {changes} price change(s)",
                user, "import")
     return backup
+
+
+# ---------------------------------------------------------------- supplier invoice PDFs
+_CAN_COUNTS = {6, 8, 9, 10, 12, 15, 18, 20, 24, 30, 36}
+_OZ_SIZES = {7, 8, 10, 11, 12, 14, 15, 16, 19, 22, 23.5, 24, 25, 32, 40}
+
+
+def distributor_units(desc, default=24):
+    """Cans / bottles in a case, the way beer distributors write it:
+    '4/6/16OZ' or '3/8/16OZ' = packs x pack size (24, 24); '30/12 CAN' or '15/25 CAN' = cans of that size (30, 15);
+    '4/6 NR', '6/4 CAN', '2/12 CAN' = packs x pack size (24); '18PK' = 18; '12/23.5OZ' = 12."""
+    d = (desc or "").upper()
+    m = re.search(r"\b(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*\d+(?:\.\d+)?", d)
+    if m and 1 <= int(m.group(1)) * int(m.group(2)) <= 48:
+        return int(m.group(1)) * int(m.group(2))
+    m = re.search(r"\b(\d{1,2})\s*PK\b", d)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(\d{1,2})\s*/\s*(\d+(?:\.\d+)?)\s*(OZ)?\b", d)
+    if m:
+        a, b = int(m.group(1)), float(m.group(2))
+        if m.group(3) or (a in _CAN_COUNTS and b in _OZ_SIZES and a >= 6):
+            return a                                    # 30/12 CAN, 15/25 CAN, 12/23.5OZ
+        if b.is_integer() and 1 <= a * int(b) <= 48:
+            return a * int(b)                           # 4/6, 6/4, 2/12
+    return default
+
+
+def read_pdf_invoice(path):
+    """Supplier invoice PDF -> (items for plan_import, invoice info, notes for the import report).
+    Southern Glazer's lines go to Liquor, Wil Fischer lines to Beer."""
+    from . import pdf_invoices
+    check_file(path, MAX_IMPORT_BYTES, {".pdf"})
+    inv = pdf_invoices.read_invoice(path)
+    if inv["kind"] == "tobacco":
+        raise ValueError(f"This is a {inv['supplier']} invoice (tobacco). Import it in the Tobacco, Cigarettes & "
+                         "Vape Pricing app instead.")
+    cat = "Liquor" if inv["kind"] == "liquor" else "Beer"
+    items, notes = [], []
+    for ln in inv["lines"]:
+        desc = clean_text(ln["description"])
+        units = ln["case_units"] or (distributor_units(desc) if cat == "Beer" else
+                                     calc.guess_case_units(desc, calc.profile(cat)["default_units"], cat))
+        item = {"item_no": ln["item_no"], "description": desc, "category": cat, "qty": ln["qty"], "price": ln["price"],
+                "net": ln["net"], "upc": ln["upc"], "case_units": units}
+        if ln["dep"] is not None:
+            item["dep"] = ln["dep"]
+        items.append({k: v for k, v in item.items() if v not in (None, "")})
+        if ln.get("note"):
+            notes.append(f"PDF line {ln['item_no']} {desc}: {ln['note']}")
+    return items, inv, pdf_invoices.check_lines(inv) + notes

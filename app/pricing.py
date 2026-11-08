@@ -71,6 +71,7 @@ def apply_changes(db, changes, user, source):
         for pid, data in by_product.items():
             db.update_product(pid, data, user, log=False, source=source)
         db.log(f"{source.capitalize()}: {len(changes)} price(s) on {len(by_product)} product(s) changed", user, "product")
+    db.notify([(f"{c['key']}_sp", c["old"], c["new"]) for c in changes])      # one up / down sound for the batch
     return backup
 
 

@@ -564,4 +564,65 @@ try:
 except ValueError:
     pass
 print("encryption tests passed")
+# ---------------- supplier invoice PDFs + sound effects (v1.5.3)
+from app import pdf_invoices as _pi, sounds as _snd
+_fx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+def _fixture_text(name):
+    return open(os.path.join(_fx, name), encoding="utf-8").read()
+
+
+_pdf = os.path.join(tmp, "inv.pdf")
+open(_pdf, "wb").write(b"%PDF-1.4 test")
+_which = ["glazers.txt"]
+_pdb2 = Database(os.path.join(tempfile.mkdtemp(), "pdf.db"))
+_pdb2.conn.execute("DELETE FROM products")
+_pdb2.conn.commit()
+with mock.patch.object(_pi, "_text", lambda p, m: _fixture_text(_which[0])):
+    _items, _inv, _notes = io_utils.read_pdf_invoice(_pdf)          # Southern Glazer's -> Liquor
+    assert _inv["ok"] and len(_items) == 10 and {i["category"] for i in _items} == {"Liquor"}
+    _cr = next(i for i in _items if i["item_no"] == "631491")
+    assert _cr["description"] == "CROWN ROYAL CANADIAN 80 YRC 750ML" and _cr["case_units"] == 12 and _cr["net"] == 278.30
+    _adds, _ups, _probs = io_utils.plan_import(_pdb2, _items)
+    io_utils.apply_import(_pdb2, _adds, _ups, "admin", "sg.pdf")
+    _p = _pdb2.find_by_upc("087000007253")
+    assert _p and _p["category"] == "Liquor" and _p["qty"] == 1 and _p["case_units"] == 12
+    _which[0] = "wilfischer.txt"                                     # Wil Fischer -> Beer, discount taken off
+    _items, _inv, _notes = io_utils.read_pdf_invoice(_pdf)
+    assert _inv["ok"] and len(_items) == 23 and {i["category"] for i in _items} == {"Beer"}
+    _bl = next(i for i in _items if i["item_no"] == "86030")
+    assert _bl["price"] == 22.60 and _bl["net"] == 21.90 and _bl["qty"] == 78 and _bl["dep"] == 0.0 and _bl["case_units"] == 30
+    assert next(i for i in _items if i["item_no"] == "11043")["case_units"] == 24                      # 4/6 = 24 cans
+    _adds, _ups, _probs = io_utils.plan_import(_pdb2, _items)
+    io_utils.apply_import(_pdb2, _adds, _ups, "admin", "wf.pdf")
+    assert len(_pdb2.list_products(category="Beer")) == 23
+    _which[0] = "wilfischer2.txt"
+    _items, _inv, _notes = io_utils.read_pdf_invoice(_pdf)
+    assert sum("out of stock" in n for n in _notes) == 2
+    _which[0] = "hub.txt"                                            # tobacco invoice -> the other app
+    try:
+        io_utils.read_pdf_invoice(_pdf)
+        raise SystemExit("tobacco PDF accepted by the beer app")
+    except ValueError as ex:
+        assert "Tobacco" in str(ex)
+_real = "/home/claude/samples"
+if os.path.isdir(_real):
+    for _f in ("b6b176d7-8001235640.pdf", "17f0f06f-SCN_INVOIC_001122685.pdf"):
+        _it, _iv, _nt = io_utils.read_pdf_invoice(os.path.join(_real, _f))
+        assert _iv["ok"] and _it and _iv["invoice_no"] and _iv["date"]
+    print("real supplier PDFs read and totals match")
+_heard = []
+_pdb2.on_change = lambda ch: _heard.append(_snd.for_changes(ch))
+_x = _pdb2.find_by_upc("087000007253")
+_pdb2.update_product(_x["id"], {"case_sp": 349.99})
+_pdb2.update_product(_x["id"], {"case_sp": 329.99})
+_pdb2.update_product(_x["id"], {"net": 280.00})
+_pdb2.update_product(_x["id"], {"notes": "x"})
+assert _heard == ["up", "down", "up", "saved"], _heard
+_snd.set_enabled(False)
+assert not _snd.play("error")
+_snd.set_enabled(True)
+_pdb2.close()
+print("pdf invoice + sound tests passed")
 print("ALL TESTS PASSED")

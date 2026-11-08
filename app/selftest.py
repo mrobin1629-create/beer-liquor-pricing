@@ -64,8 +64,27 @@ def run(out_path):
         assert os.path.getsize(pdf) > 1000 and io_utils.read_file(xlsx)
         from reportlab.graphics.barcode import createBarcodeDrawing
         createBarcodeDrawing("UPCA", value="01234567890")
-        import defusedxml  # noqa: F401  (protects Excel imports)
-        return "PDF, Excel, barcode"
+        __import__("defusedxml")             # protects Excel imports
+        from reportlab.pdfgen import canvas  # a small Wil Fischer-style invoice, read back with the PDF reader
+        from . import pdf_invoices
+        inv_pdf = os.path.join(tmp, "inv.pdf")
+        c = canvas.Canvas(inv_pdf)
+        for i, line in enumerate(("WIL FISCHER COMPANIES", "Account: X Invoice#: 4871 PO#:", "Tue Nov 03, 2026",
+                                  "ITEM# QTYDESCRIPTION PRICE DISC DEP EXT", "86030 2 22.60 0.70 0.00 43.80BUSCH LIGHT 30/12 CAN",
+                                  "Cases: 2", "Total Sales 45.20")):
+            c.drawString(40, 800 - i * 14, line)
+        c.save()
+        inv = pdf_invoices.read_invoice(inv_pdf)
+        assert inv["ok"] and inv["lines"][0]["net"] == 21.90, inv
+        return "PDF, Excel, barcode, PDF invoice reader"
+
+    def sounds_check():
+        from . import sounds
+        for name in sounds.SOUNDS:
+            assert os.path.getsize(sounds._file(name)) > 1000
+        if sys.platform.startswith("win"):
+            __import__("winsound")
+        return f"{len(sounds.SOUNDS)} sounds ready"
 
     def license_and_updates():
         from . import license as lic
@@ -90,7 +109,7 @@ def run(out_path):
         return f"tk {tk.TkVersion}, logo {size}"
 
     for name, fn in (("windows_key_lock", windows_key_lock), ("database", database), ("files", files),
-                     ("license_and_updates", license_and_updates), ("screen", screen)):
+                     ("license_and_updates", license_and_updates), ("sounds", sounds_check), ("screen", screen)):
         if name == "files" and "_db" not in results:
             results[name] = "skipped (database failed)"
             ok = False
