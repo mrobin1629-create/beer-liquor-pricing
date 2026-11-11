@@ -83,7 +83,7 @@ MIGRATIONS = [
 # fields whose changes are written to price_history
 PRICE_FIELDS = ["price", "net", "dep", "case_units"] + [f"{k}_sp" for k in calc.ALL_SLOTS]
 AUDIT_KINDS = {"login": "Sign-in", "security": "Security", "product": "Products", "import": "Import",
-               "export": "Export / PDF", "backup": "Backup / Restore", "user": "Users",
+               "export": "Export / PDF", "backup": "Backup / Restore", "sync": "Sync", "user": "Users",
                "settings": "Settings", "maintenance": "Health check", "other": "Other"}
 
 PRODUCT_FIELDS = ["pallet", "item_no", "description", "category", "qty", "price",

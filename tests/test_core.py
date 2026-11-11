@@ -625,4 +625,125 @@ assert not _snd.play("error")
 _snd.set_enabled(True)
 _pdb2.close()
 print("pdf invoice + sound tests passed")
+# ---------------- sync between two computers through a cloud folder
+from app import sync as _sync, vault as _vlt
+
+
+def _fbd(d):
+    return next((p for p in d.list_products() if p["description"] == "SYNC TEST BRAND"), None)
+
+_cloud = tempfile.mkdtemp(prefix="cloud-")
+_desk_dir, _lap_dir = tempfile.mkdtemp(prefix="desk-"), tempfile.mkdtemp(prefix="lap-")
+
+
+def _as(computer):
+    _sync._state_path = os.path.join(_desk_dir if computer == "desk" else _lap_dir, "sync.json")
+    os.environ["COMPUTERNAME"] = "DESKTOP" if computer == "desk" else "LAPTOP"
+
+
+_as("desk")
+_desk = Database(os.path.join(_desk_dir, "d.db"))
+_desk.set_setting("license_key", "DESK-KEY")
+_desk.set_backup_password("Shop-Safe-2026")
+_d_id = _desk.add_product({"description": "SYNC TEST BRAND", "category": _desk.list_products()[0]["category"], "net": 50,
+                           "case_units": 10})
+assert _sync.status(_desk)["kind"] == "off"
+_sync.set_folder(_cloud)
+assert _sync.status(_desk)["kind"] == "first"
+_m1 = _sync.push(_desk)
+assert _sync.status(_desk)["kind"] == "same" and _m1["computer"] == "DESKTOP"
+assert _some.decode() not in open(os.path.join(_sync.sync_dir(), _sync.DATA_FILE), "rb").read().decode("latin-1")  # encrypted
+_sync.mark_open(True)
+# laptop: its own data, its own license, a different key
+_as("lap")
+_lap = Database(os.path.join(_lap_dir, "l.db"))
+_lap.set_setting("license_key", "LAP-KEY")
+assert _lap._key != _desk._key
+_sync.set_folder(_cloud)
+assert _sync.other_open()["computer"] == "DESKTOP"                         # warns: still open on the desktop
+_s = _sync.status(_lap)
+assert _s["kind"] == "remote_newer" and _s["manifest"]["computer"] == "DESKTOP"
+try:
+    _sync.pull(_lap)                                                         # first time needs the backup password
+    raise SystemExit("pulled without password")
+except _vlt.NeedPassword:
+    pass
+_asked = []
+_sync.pull(_lap, lambda m: (_asked.append(m), "Shop-Safe-2026")[1])
+assert len(_asked) == 1 and _fbd(_lap)
+assert _lap.get_setting("license_key") == "LAP-KEY"                         # the laptop keeps its own license
+assert _lap._key == _desk._key and _lap.has_backup_password()               # now both share the key
+assert _sync.status(_lap)["kind"] == "same"
+_lap.close()
+_lap = Database(os.path.join(_lap_dir, "l.db"))                              # reopens with no password (re-locked here)
+_lp = _fbd(_lap)
+_lap.update_product(_lp["id"], {"case_sp": 6.49})
+assert _sync.status(_lap)["kind"] == "local_newer"
+_sync.push(_lap)
+# desktop: sees the laptop's change and loads it - no password now
+_as("desk")
+_sync.mark_open(False)
+assert _sync.status(_desk)["kind"] == "remote_newer"
+_sync.pull(_desk)
+assert _fbd(_desk)["case_sp"] == 6.49 and _desk.get_setting("license_key") == "DESK-KEY"
+# both change: neither side overwrites silently
+_desk.update_product(_fbd(_desk)["id"], {"case_sp": 6.99})
+_sync.push(_desk)
+_as("lap")
+_lap.update_product(_lp["id"], {"case_sp": 5.99})
+assert _sync.status(_lap)["kind"] == "both_changed"
+_as("desk")
+assert _sync.status(_desk)["kind"] == "same"
+_as("lap")
+_sync.pull(_lap)                                                             # the person chose to load the desktop's
+assert _fbd(_lap)["case_sp"] == 6.99
+assert any(f.startswith("before-sync") for f, *_ in _lap.list_backups())   # laptop's version kept in a backup
+# still downloading / newer app on the other computer: refused, nothing changed
+_as("desk")
+_desk.update_product(_fbd(_desk)["id"], {"case_sp": 7.49})
+_m3 = _sync.push(_desk)
+_mf = os.path.join(_sync.sync_dir(), _sync.MANIFEST)
+_good = open(_mf).read()
+_bad = _json.loads(_good)
+_bad["sha256"] = "0" * 64
+open(_mf, "w").write(_json.dumps(_bad))
+_as("lap")
+try:
+    _sync.pull(_lap)
+    raise SystemExit("half-downloaded copy loaded")
+except ValueError as ex:
+    assert "still downloading" in str(ex)
+_bad = _json.loads(_good)
+_bad["schema"] = 999
+open(_mf, "w").write(_json.dumps(_bad))
+try:
+    _sync.pull(_lap)
+    raise SystemExit("newer schema loaded")
+except ValueError as ex:
+    assert "newer version of the app" in str(ex)
+open(_mf, "w").write(_good)
+_sync.pull(_lap)
+assert _fbd(_lap)["case_sp"] == 7.49
+assert "Up to date" in _sync.describe(_lap)
+# a store that never set a backup password can't be opened on another computer
+_c2 = tempfile.mkdtemp(prefix="cloud2-")
+_as("desk")
+_nopw = Database(os.path.join(tempfile.mkdtemp(), "n.db"))
+_sync._state_path = os.path.join(tempfile.mkdtemp(), "s.json")
+_sync.set_folder(_c2)
+_sync.push(_nopw)
+_as("lap")
+_sync._state_path = os.path.join(tempfile.mkdtemp(), "s2.json")
+_sync.set_folder(_c2)
+try:
+    _sync.pull(_lap, lambda m: "x")
+    raise SystemExit("opened without backup password")
+except ValueError as ex:
+    assert "backup password" in str(ex)
+_sync.set_folder("")
+assert _sync.status(_lap)["kind"] == "off"
+for _x in (_desk, _lap, _nopw):
+    _x.close()
+_sync._state_path = None
+print("sync tests passed")
 print("ALL TESTS PASSED")

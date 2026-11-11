@@ -86,6 +86,12 @@ HELP_TOPICS = [
      "After 5 wrong passwords, sign-in pauses for 1 minute (longer if it keeps happening). "
      "To change yours: Users > Change my password (asks for your current one). "
      "Forgot it? An admin can use Users > Reset password."),
+    (("sync", "laptop", "desktop", "two computers", "onedrive", "dropbox", "another computer", "other computer"),
+     "To use the app on two computers with the same data: on each computer go to Backup > Set up sync and pick the SAME "
+     "service (OneDrive or Dropbox). Closing the app saves an encrypted copy there; opening it on the other computer "
+     "offers to load it. The first time on a computer it asks for the backup password, never again after that. Each "
+     "computer needs its own license key (Computer IDs differ) and keeps it. Close the app on one computer before "
+     "opening it on the other. If both changed, the app asks which to keep and backs up the other."),
     (("pdf", "invoice pdf", "import pdf", "glazer", "southern", "fischer", "wil fischer"),
      "Import a supplier invoice PDF with Import and pick the PDF. Known layouts: Southern Glazer's (goes to Liquor) and "
      "Wil Fischer (goes to Beer); HUB KCCC tobacco invoices go in the Tobacco app. The app reads every line (Item#, "

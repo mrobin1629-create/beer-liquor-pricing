@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import calc, io_utils, labels, pricing, security, sounds
 from . import license as lic
-from . import updater
+from . import sync, updater
 from . import vault
 from .license_ui import LicenseDialog, startup_gate
 from .chatbot import ChatBot
@@ -985,6 +985,7 @@ class App(tk.Tk):
             self.alive = False
             self.destroy()
             return
+        self._startup_sync()                                             # newer data from the other computer?
         login = LoginDialog(self, db)
         self.wait_window(login)
         self.alive = bool(login.user)
@@ -1865,6 +1866,12 @@ class App(tk.Tk):
                          [("Set backup password…", self._set_backup_password, "TButton")])
         self.bp_status = tk.Label(body, text="", font=FONT_B, bg=PANEL, anchor="w")
         self.bp_status.pack(anchor="w", pady=(0, 4))
+        self._action_row(body, "Sync between computers", "Use the app on two computers (e.g. desktop and laptop) with "
+                                                         "the same data, through OneDrive or Dropbox. Close the app on one "
+                                                         "computer before opening it on the other.",
+                         [("Set up sync…", self._setup_sync, "TButton"), ("⇅ Sync now", self._sync_now, "Accent.TButton")])
+        self.sync_status = tk.Label(body, text="", font=FONT_B, bg=PANEL, anchor="w", justify="left", wraplength=900)
+        self.sync_status.pack(anchor="w", pady=(0, 4))
         self._action_row(body, "Restore from a backup", "Replaces the current data with a backup file. The file is checked first, "
                          "and a safety backup of the current data is saved.\nBackups from older versions are upgraded automatically.",
                          [("Restore from file…", self._restore, "Danger.TButton")])
@@ -1908,6 +1915,10 @@ class App(tk.Tk):
         return "Other"
 
     def _refresh_backups(self):
+        if hasattr(self, "sync_status"):
+            txt = sync.describe(self.db)
+            self.sync_status.config(text="⇅ Sync: " + txt, fg="#c62828" if ("PROBLEM" in txt or "NEWER" in txt or
+                                                                         "Both" in txt) else "#2e7d32")
         if hasattr(self, "bp_status"):
             has = self.db.has_backup_password()
             self.bp_status.config(text="🔒 Encrypted.  Backup password: " + ("set" if has else "NOT SET - please set one"),
@@ -1924,6 +1935,170 @@ class App(tk.Tk):
             who = getattr(self, "user", None) or {"username": "license screen"}
             self.db.log(f"Backup created: {path}", who["username"], "backup")
             messagebox.showinfo("Backup saved", f"Backup saved to\n{path}")
+
+    # ---------- sync between computers ----------
+    def _ask_sync_password(self, msg=None):
+        return simpledialog.askstring("Backup password", (f"{msg}\n\n" if msg else "") +
+                                      "This data comes from your other computer.\nEnter the store's BACKUP PASSWORD "
+                                      "(asked only this first time on this computer):", show="•", parent=self)
+
+    def _sync_pull(self, m):
+        try:
+            sync.pull(self.db, self._ask_sync_password)
+        except vault.NeedPassword:
+            return False
+        except Exception as ex:
+            sounds.play("error")
+            messagebox.showerror("Sync", f"Couldn't load the data from {m.get('computer')}:\n{ex}\n\n"
+                                 "This computer's data was not changed.")
+            return False
+        sounds.play("success")
+        return True
+
+    def _sync_offer(self, s, at_start):
+        """Asks before loading the other computer's data. Returns True if it was loaded."""
+        m, st = s["manifest"], s["state"]
+        who, when = m.get("computer", "the other computer"), sync.when(m.get("saved_at"))
+        if s["kind"] == "both_changed":
+            ans = messagebox.askyesnocancel(
+                "Both computers have changes",
+                f"{who} saved newer data ({when}), and this computer also has changes that weren't synced.\n\n"
+                f"YES - load {who}'s data (this computer's changes are kept in a backup on this computer)\n"
+                f"NO - keep this computer's data ({who}'s will be replaced when you close the app here)\n"
+                "CANCEL - decide later (Backup > Sync now)", parent=self)
+            if ans is None:
+                return False
+            if ans is False:
+                st["have"] = m["version"]              # this computer's data wins at the next save
+                sync.save_state(st)
+                return False
+            return self._sync_pull(m)
+        first = not st.get("have")
+        msg = (f"Your data from {who} (saved {when}) is in {sync.folder_label(st.get('folder'))}.\n\n"
+               + ("Load it on this computer? This computer's current data will be replaced (a backup of it is kept)."
+                  if first else f"Load the newer data from {who}?"))
+        if messagebox.askyesno("Newer data from your other computer" if not first else "Load your data", msg, parent=self):
+            return self._sync_pull(m)
+        return False
+
+    def _startup_sync(self):
+        try:
+            s = sync.status(self.db)
+        except Exception:
+            return
+        if s["kind"] == "no_folder":
+            messagebox.showwarning("Sync", "The sync folder isn't available right now:\n" + s["state"].get("folder", "")
+                                   + "\n\nYou can keep working; your data will be saved there when it's back.", parent=self)
+            return
+        if s["kind"] == "off":
+            return
+        other = sync.other_open(s["state"])
+        if other:
+            messagebox.showwarning("Open on another computer?", f"The app looks open on {other.get('computer')} "
+                                   f"(since {sync.when(other.get('since'))}). Close it there first, or changes made on "
+                                   "both computers will clash.", parent=self)
+        if s["kind"] in ("remote_newer", "both_changed"):
+            self._sync_offer(s, True)
+        sync.mark_open(True)
+
+    def _sync_on_close(self):
+        s = sync.status(self.db)
+        if s["kind"] in ("off", "same", "remote_newer"):
+            return
+        if s["kind"] == "no_folder":
+            raise ValueError("The sync folder isn't available: " + s["state"].get("folder", ""))
+        if s["kind"] == "both_changed":
+            m = s["manifest"]
+            if not messagebox.askyesno("Replace the other computer's data?",
+                                       f"{m.get('computer')} saved newer data ({sync.when(m.get('saved_at'))}) while the app "
+                                       f"was open here.\n\nReplace it with this computer's data?\n(NO keeps "
+                                       f"{m.get('computer')}'s data in the cloud; this computer's stays here.)", parent=self):
+                return
+        sync.push(self.db)
+
+    def _sync_now(self):
+        s = sync.status(self.db)
+        k = s["kind"]
+        if k == "off":
+            return self._setup_sync()
+        if k == "no_folder":
+            messagebox.showwarning("Sync", "The sync folder isn't available:\n" + s["state"].get("folder", ""))
+        elif k in ("remote_newer", "both_changed"):
+            if self._sync_offer(s, False):
+                messagebox.showinfo("Sync", f"Loaded the data from {s['manifest'].get('computer')}.")
+                self.refresh()
+        else:
+            try:
+                sync.push(self.db)
+                sounds.play("success")
+                messagebox.showinfo("Sync", "This computer's data was saved to " + sync.folder_label(s["state"]["folder"]) + ".")
+            except Exception as ex:
+                sounds.play("error")
+                messagebox.showerror("Sync", f"Couldn't save to the sync folder:\n{ex}")
+        self._refresh_backups()
+
+    def _setup_sync(self):
+        if not self._need_admin("set up sync"):
+            return
+        st = sync.load_state()
+        win = tk.Toplevel(self)
+        win.title("Sync between computers")
+        win.configure(bg=PANEL)
+        win.transient(self)
+        win.grab_set()
+        tk.Label(win, text="Where should the data be shared?", font=FONT_H, bg=PANEL).pack(anchor="w", padx=18, pady=(14, 4))
+        tk.Label(win, text="Pick the SAME service on both computers (e.g. OneDrive on the desktop and OneDrive on the "
+                           "laptop).\nOnly encrypted data is stored there.", font=FONT, bg=PANEL, justify="left"
+                 ).pack(anchor="w", padx=18)
+        choice = tk.StringVar(value=st.get("folder") or "")
+        opts = sync.cloud_folders()
+        for label, path in opts:
+            tk.Radiobutton(win, text=f"{label}   ({path})", variable=choice, value=path, bg=PANEL, font=FONT,
+                           anchor="w").pack(fill="x", padx=24, pady=2)
+        if not opts:
+            tk.Label(win, text="No OneDrive or Dropbox folder was found on this computer. Choose a folder below.",
+                     font=FONT, bg=PANEL, fg="#c62828").pack(anchor="w", padx=24, pady=4)
+        other = tk.StringVar(value=st.get("folder") if st.get("folder") and st["folder"] not in [p for _, p in opts] else "")
+
+        def browse():
+            d = filedialog.askdirectory(title="Choose the shared folder", parent=win)
+            if d:
+                other.set(d)
+                choice.set(d)
+        row = tk.Frame(win, bg=PANEL)
+        row.pack(fill="x", padx=24, pady=2)
+        tk.Radiobutton(row, text="Other folder:", variable=choice, value="__other__", bg=PANEL, font=FONT).pack(side="left")
+        tk.Entry(row, textvariable=other, width=50, font=FONT).pack(side="left", padx=4)
+        ttk.Button(row, text="Browse…", command=browse).pack(side="left")
+        if other.get():
+            choice.set(other.get())
+        tk.Radiobutton(win, text="Off (don't sync)", variable=choice, value="", bg=PANEL, font=FONT, anchor="w"
+                       ).pack(fill="x", padx=24, pady=(2, 8))
+
+        def save():
+            folder = other.get() if choice.get() == "__other__" else choice.get()
+            if folder and not os.path.isdir(folder):
+                messagebox.showwarning("Sync", "That folder doesn't exist.", parent=win)
+                return
+            win.destroy()
+            sync.set_folder(folder)
+            self.db.log(f"Sync {'set to ' + folder if folder else 'turned off'}", self.user["username"], "sync")
+            if folder:
+                s = sync.status(self.db)
+                if s["kind"] in ("remote_newer", "both_changed"):
+                    if self._sync_offer(s, False):
+                        self.refresh()
+                elif s["kind"] in ("first", "local_newer"):
+                    sync.push(self.db)
+                    messagebox.showinfo("Sync is on", f"This computer's data is now in {sync.folder_label(folder)}.\n\n"
+                                        "On your other computer: install the app, sign in, then Backup > Set up sync and "
+                                        "pick the same service. It will offer to load this data.")
+                sync.mark_open(True)
+            self._refresh_backups()
+        bar = tk.Frame(win, bg=PANEL)
+        bar.pack(fill="x", padx=18, pady=(0, 14))
+        ttk.Button(bar, text="Save", style="Accent.TButton", command=save).pack(side="right")
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=8)
 
     def _ask_backup_password(self, msg=None):
         return simpledialog.askstring("Backup password", (f"{msg}\n\n" if msg else "") +
@@ -2194,6 +2369,12 @@ class App(tk.Tk):
             self._update_footer()
 
     def on_close(self):
+        try:
+            self._sync_on_close()
+        except Exception as ex:
+            messagebox.showwarning("Sync", f"This computer's data couldn't be saved to the sync folder:\n{ex}\n\n"
+                                   "It's safe on this computer. It will be saved next time.")
+        sync.mark_open(False)
         try:
             if self.db.get_setting("auto_backup", "1") == "1":
                 self.db.auto_backup()

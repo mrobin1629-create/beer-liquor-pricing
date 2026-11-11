@@ -1,4 +1,12 @@
-# Beer and Liquor Pricing - Version 1.5.3
+# Beer and Liquor Pricing - Version 1.5.4
+
+- Sync between computers (desktop and laptop) through OneDrive or Dropbox: Backup > Set up sync. Closing the app saves
+  an encrypted copy to the cloud folder; opening it on the other computer offers to load it. The backup password is
+  asked once per computer. Each computer keeps its own license. Nothing is overwritten silently: if both computers
+  changed something, you choose, and a backup of the other version is kept.
+- Restoring a backup no longer replaces this computer's license.
+
+## Version 1.5.3
 
 - Import supplier invoice PDFs with Import: Southern Glazer's (to Liquor - item, size, cases, price, net, UPC, bottles
   per case) and Wil Fischer (to Beer - item, cases, price, net after discount, deposit, cans per case). Every line is

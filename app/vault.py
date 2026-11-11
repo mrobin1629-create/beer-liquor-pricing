@@ -266,8 +266,9 @@ def read_header(path):
 
 
 @contextlib.contextmanager
-def open_backup(path, local_key, ask_password=None):
-    """Yields a connection to the database inside a backup file (encrypted or an old unencrypted one)."""
+def open_backup(path, local_key, ask_password=None, found=None):
+    """Yields a connection to the database inside a backup file (encrypted or an old unencrypted one).
+    `found` (a dict), if given, receives the key and header that opened it."""
     check_file(path, MAX_BACKUP_BYTES)
     tmpdir = tempfile.mkdtemp(prefix="rm-res-")
     conn = None
@@ -311,6 +312,8 @@ def open_backup(path, local_key, ask_password=None):
                 conn = connect(work, key)
             except sql.DatabaseError:
                 raise ValueError("That backup file is damaged and can't be opened.")
+            if found is not None:
+                found.update(key=key, header=header)
         yield conn
     finally:
         if conn is not None:
@@ -445,12 +448,16 @@ class VaultMixin:
         return [(os.path.basename(f), datetime.datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M"),
                  os.path.getsize(f)) for f in files]
 
-    def restore(self, src, ask_password=None):
+    # settings that belong to this computer, never taken from another computer's data
+    MACHINE_SETTINGS = ("license_key", "lic_seen", "lic_trial")
+
+    def restore(self, src, ask_password=None, found=None, reason="before-restore"):
         """Replaces the data with a backup (encrypted, or an old unencrypted one). Checks it first and saves a
         safety backup of the current data. Returns the safety backup's path."""
         not_ours = f"That file is not a {self.APP_LABEL} backup."
         newfile = self.path + ".restoring"
-        with open_backup(src, self._key, ask_password) as test:
+        mine = {k: self.get_setting(k, "") for k in self.MACHINE_SETTINGS}
+        with open_backup(src, self._key, ask_password, found) as test:
             try:
                 ok = test.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'").fetchone()
                 extra = test.execute("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger','view')").fetchone()[0]
@@ -465,7 +472,7 @@ class VaultMixin:
             if not healthy:
                 raise ValueError("That backup file is damaged (failed the integrity check). Nothing was changed.")
             export_to(test, newfile, self._key)
-        safety = self.safety_backup("before-restore")
+        safety = self.safety_backup(reason)
         try:
             src = connect(newfile, self._key)       # copied in page by page through SQLite itself, so it works
             try:                                    # even while Windows has the data file open
@@ -477,6 +484,24 @@ class VaultMixin:
                 os.remove(newfile)
         self.conn.close()
         self._open()           # also upgrades an older backup to the current schema
+        for k, v in mine.items():                  # this computer's license / trial stay this computer's
+            self.set_setting(k, v)
+        return safety
+
+    def load_from_other_computer(self, src, ask_password=None):
+        """Loads another computer's synced copy. The first time, the backup password unlocks it; then this computer
+        switches to the same data key (locked to this Windows user), so later syncs need no password."""
+        found = {}
+        safety = self.restore(src, ask_password, found, reason="before-sync")
+        key, header = found.get("key"), found.get("header") or {}
+        if key and key != self._key:
+            self.conn.execute(f"PRAGMA rekey = \"x'{key.hex()}'\"")
+            d = self.keyfile.load()
+            d.update(id=key_id(key), local=_protect(key))
+            if header.get("pw"):
+                d["pw"] = header["pw"]                 # the store's backup password (same on both computers now)
+            self.keyfile._save(d)
+            self._key = key
         return safety
 
     def encryption_lines(self):
